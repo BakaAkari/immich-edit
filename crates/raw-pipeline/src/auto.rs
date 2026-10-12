@@ -43,77 +43,88 @@ pub fn auto_adjust(frame: &RawFrame, context: &Edits) -> Edits {
     let highlight_frac = hist_fraction_above(&s.hist, s.total, 240);
     let clipped_frac = hist_fraction_above(&s.hist, s.total, 250);
 
-    let diff = 128.0 - p50 as f64;
+    // Social-ready, Capture One style punchy & luminous heuristics:
+    // Target perceptual luminous midtone around 140 (standard for mobile/social), not dull 128.
+    let diff = 136.0 - p50 as f64;
     let target_ev = if diff > 0.0 {
-        (diff / 55.0).min(2.5)
+        (diff / 39.0).min(2.5)
     } else {
-        (diff / 64.0).max(-2.0)
+        (diff / 50.0).max(-2.0)
     };
 
-    let ev_headroom = ((252.0 - p99 as f64) / 18.0).max(0.0);
+    // Calculate headroom with specular clipping awareness
+    let ev_headroom = ((254.0 - p99 as f64) / 12.0).max(0.0);
     let exposure_ev = if target_ev > 0.0 {
-        let cap = if clipped_frac > 0.05 {
+        let cap = if clipped_frac > 0.08 {
             0.0
-        } else if clipped_frac > 0.015 {
-            ev_headroom.max(0.5)
+        } else if clipped_frac > 0.03 {
+            ev_headroom.max(0.7)
         } else {
-            ev_headroom.max(0.6)
+            ev_headroom.max(1.2)
         };
         target_ev.min(cap)
     } else {
         target_ev
     };
 
-    let brightness = ((target_ev - exposure_ev) * 35.0).clamp(0.0, 30.0);
+    let brightness = ((target_ev - exposure_ev) * 35.0).clamp(0.0, 35.0);
 
-    let mut contrast = 10.0f64;
-    if range < 200.0 {
-        contrast += ((200.0 / range) - 1.0) * 8.0;
+    // C1-style punchy tone curve & contrast:
+    let mut contrast = 15.0f64;
+    if range < 210.0 {
+        contrast += ((210.0 / range) - 1.0) * 12.0;
     }
-    if highlight_frac > 0.06 {
-        contrast *= 0.7;
+    if highlight_frac > 0.08 {
+        contrast *= 0.75;
     }
-    contrast = contrast.clamp(-25.0, 30.0);
+    contrast = contrast.clamp(-15.0, 35.0);
 
-    let shadow_frac = hist_fraction_below(&s.hist, s.total, 32);
-    let mut shadows = 0.0f64;
-    if shadow_frac > 0.03 {
-        shadows = (shadow_frac * 50.0 + 5.0).min(40.0);
+    // Deep shadow lifting (HDR style):
+    let shadow_frac = hist_fraction_below(&s.hist, s.total, 40);
+    let mut shadows = 18.0f64;
+    if shadow_frac > 0.02 {
+        shadows = (shadows + shadow_frac * 60.0).min(50.0);
     }
 
-    let simulated_p01 = (p01 as f64 + exposure_ev * 22.0).clamp(0.0, 255.0);
-    let simulated_p99 = (p99 as f64 + exposure_ev * 22.0).clamp(0.0, 255.0);
+    let simulated_p01 = (p01 as f64 + exposure_ev * 24.0).clamp(0.0, 255.0);
+    let simulated_p99 = (p99 as f64 + exposure_ev * 24.0).clamp(0.0, 255.0);
 
-    let mut highlights = 0.0f64;
-    if highlight_frac > 0.008 {
-        highlights = -(highlight_frac * 180.0).min(70.0);
+    // Aggressive highlight recovery to protect highlights under lifted exposure:
+    let mut highlights = -25.0f64;
+    if highlight_frac > 0.005 {
+        highlights -= (highlight_frac * 200.0).min(45.0);
     }
-    if clipped_frac > 0.003 {
-        highlights -= (clipped_frac * 700.0).min(30.0);
+    if clipped_frac > 0.002 {
+        highlights -= (clipped_frac * 800.0).min(30.0);
     }
-    if simulated_p99 > 240.0 {
-        highlights -= (simulated_p99 - 240.0) * 1.5;
+    if simulated_p99 > 235.0 {
+        highlights -= (simulated_p99 - 235.0) * 1.5;
     }
-    highlights = highlights.clamp(-85.0, 0.0);
+    highlights = highlights.clamp(-90.0, -10.0);
 
-    let mut clarity = 8.0f64;
-    if highlight_frac > 0.06 {
-        clarity *= 0.6;
-    }
-    if shadow_frac > 0.30 {
+    // Microcontrast clarity
+    let mut clarity = 10.0f64;
+    if highlight_frac > 0.08 {
         clarity *= 0.7;
     }
-    clarity = clarity.clamp(0.0, 14.0);
+    if shadow_frac > 0.35 {
+        clarity *= 0.8;
+    }
+    clarity = clarity.clamp(4.0, 18.0);
 
-    let blacks = -((simulated_p01 - 5.0) * 0.4).clamp(-10.0, 20.0);
-    let whites = if simulated_p99 < 240.0 {
-        ((245.0 - simulated_p99) * 0.2).clamp(-30.0, 5.0)
+    // Auto-levels stretching:
+    // Pin black point down to ensure inky blacks & remove haze/fog:
+    let blacks = -((simulated_p01).max(8.0) * 0.45).clamp(8.0, 28.0);
+
+    // Stretch whites up if headroom permits, else compress:
+    let whites = if simulated_p99 < 235.0 {
+        ((240.0 - simulated_p99) * 0.3).clamp(5.0, 25.0)
     } else {
-        ((simulated_p99 - 250.0) * -0.3).clamp(-30.0, 0.0)
+        ((simulated_p99 - 245.0) * -0.4).clamp(-30.0, 0.0)
     };
 
-    let vibrance = (8.0 + (0.34 - s.mean_sat as f64) * 60.0).clamp(6.0, 30.0);
-
+    // Rich vibrance for vibrant social look:
+    let vibrance = (14.0 + (0.34 - s.mean_sat as f64) * 65.0).clamp(10.0, 35.0);
     Edits {
         basic: BasicEdits {
             exposure_ev,
