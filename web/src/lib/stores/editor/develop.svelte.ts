@@ -73,6 +73,8 @@ export async function autoAdjust(ctx: DevelopCtx): Promise<void> {
         exposure_ev: suggested.basic.exposure_ev,
         brightness: suggested.basic.brightness,
         contrast: suggested.basic.contrast,
+        clarity: suggested.basic.clarity,
+        dehaze: suggested.basic.dehaze,
         vibrance: suggested.basic.vibrance
       },
       tone: { ...suggested.tone }
