@@ -286,3 +286,19 @@ fn auto_does_not_set_unowned_basic_fields() {
         panic!("auto set non-owned basic fields: {:?}", e.basic);
     }
 }
+
+#[test]
+fn portrait_auto_avoids_dehaze_and_softens_clarity() {
+    let f = make_frame_luma(0.18, 64, 64);
+    let e = auto_adjust_scene(&f, &Edits::default(), AutoScene::Portrait);
+    assert_eq!(e.basic.dehaze, 0.0);
+    assert!(e.basic.clarity <= 6.0);
+}
+
+#[test]
+fn landscape_auto_applies_dehaze() {
+    let f = make_frame_luma(0.18, 64, 64);
+    let e = auto_adjust_scene(&f, &Edits::default(), AutoScene::Landscape);
+    assert!(e.basic.dehaze >= 8.0);
+    assert!(e.basic.clarity >= 10.0);
+}
