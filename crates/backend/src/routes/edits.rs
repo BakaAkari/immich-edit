@@ -218,12 +218,36 @@ pub async fn auto(
     body: axum::body::Bytes,
 ) -> Result<Json<Edits>, AppError> {
     let context = context_edits(&body)?;
-    let frame = state
+    let frame_fut = state
         .render
-        .frame(RenderIdentity::from(&ctx), &ctx.immich, id.source())
-        .await?;
+        .frame(RenderIdentity::from(&ctx), &ctx.immich, id.source());
+    let faces_fut = ctx.immich.asset_faces(id.source());
+
+    let (frame_res, faces_res) = tokio::join!(frame_fut, faces_fut);
+    let frame = frame_res?;
+
+    // Determine scene: if significant faces detected -> Portrait, else -> Landscape
+    let scene = match faces_res {
+        Ok(faces) if !faces.is_empty() => {
+            let has_significant_face = faces.iter().any(|f| {
+                if f.image_width == 0 || f.image_height == 0 {
+                    return false;
+                }
+                let fw = (f.bounding_box_x2 - f.bounding_box_x1).abs() as f64 / f.image_width as f64;
+                let fh = (f.bounding_box_y2 - f.bounding_box_y1).abs() as f64 / f.image_height as f64;
+                fw * fh >= 0.01 // Face area >= 1% of total image
+            });
+            if has_significant_face {
+                raw_pipeline::auto::AutoScene::Portrait
+            } else {
+                raw_pipeline::auto::AutoScene::Landscape
+            }
+        }
+        _ => raw_pipeline::auto::AutoScene::Landscape,
+    };
+
     let edits =
-        tokio::task::spawn_blocking(move || raw_pipeline::auto::auto_adjust(&frame, &context))
+        tokio::task::spawn_blocking(move || raw_pipeline::auto::auto_adjust_scene(&frame, &context, scene))
             .await
             .map_err(|e| AppError::internal("auto adjust task", &e))?;
     Ok(Json(edits))
