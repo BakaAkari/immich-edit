@@ -1,3 +1,11 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoScene {
+    #[default]
+    Auto,
+    Portrait,
+    Landscape,
+}
+
 mod stats;
 
 #[cfg(test)]
@@ -21,6 +29,10 @@ pub fn scale_matrix(m: [[f32; 3]; 3], gain: f32) -> [[f32; 3]; 3] {
     ]
 }
 pub fn auto_adjust(frame: &RawFrame, context: &Edits) -> Edits {
+    auto_adjust_scene(frame, context, AutoScene::Auto)
+}
+
+pub fn auto_adjust_scene(frame: &RawFrame, context: &Edits, scene: AutoScene) -> Edits {
     let context = context.clamped();
     let (wb, m) = display_color(frame);
     let decimated = decimate_mosaic(frame);
@@ -69,10 +81,14 @@ pub fn auto_adjust(frame: &RawFrame, context: &Edits) -> Edits {
 
     let brightness = ((target_ev - exposure_ev) * 35.0).clamp(0.0, 35.0);
 
-    // C1-style punchy tone curve & contrast:
-    let mut contrast = 15.0f64;
+    // C1-style punchy tone curve & contrast, adapted to scene:
+    let is_portrait = matches!(scene, AutoScene::Portrait);
+    let is_landscape = matches!(scene, AutoScene::Landscape);
+
+    let base_contrast = if is_portrait { 11.0f64 } else if is_landscape { 18.0f64 } else { 15.0f64 };
+    let mut contrast = base_contrast;
     if range < 210.0 {
-        contrast += ((210.0 / range) - 1.0) * 12.0;
+        contrast += ((210.0 / range) - 1.0) * if is_portrait { 8.0 } else { 12.0 };
     }
     if highlight_frac > 0.08 {
         contrast *= 0.75;
@@ -81,9 +97,10 @@ pub fn auto_adjust(frame: &RawFrame, context: &Edits) -> Edits {
 
     // Deep shadow lifting (HDR style):
     let shadow_frac = hist_fraction_below(&s.hist, s.total, 40);
-    let mut shadows = 18.0f64;
+    let base_shadows = if is_portrait { 28.0f64 } else { 18.0f64 };
+    let mut shadows = base_shadows;
     if shadow_frac > 0.02 {
-        shadows = (shadows + shadow_frac * 60.0).min(50.0);
+        shadows = (shadows + shadow_frac * if is_portrait { 70.0 } else { 55.0 }).min(50.0);
     }
 
     let simulated_p01 = (p01 as f64 + exposure_ev * 24.0).clamp(0.0, 255.0);
@@ -102,19 +119,32 @@ pub fn auto_adjust(frame: &RawFrame, context: &Edits) -> Edits {
     }
     highlights = highlights.clamp(-90.0, -10.0);
 
-    // Microcontrast clarity
-    let mut clarity = 10.0f64;
-    if highlight_frac > 0.08 {
-        clarity *= 0.7;
-    }
-    if shadow_frac > 0.35 {
-        clarity *= 0.8;
-    }
-    clarity = clarity.clamp(4.0, 18.0);
+    // Microcontrast clarity & Dehaze (critical portrait vs landscape split):
+    let (mut clarity, dehaze) = if is_portrait {
+        let c = 5.0f64;
+        (c, 0.0f64)
+    } else if is_landscape {
+        let mut c = 14.0f64;
+        if highlight_frac > 0.08 { c *= 0.7; }
+        // Compute dehaze from dynamic range compression and low-end haze:
+        let dh = if range < 190.0 || shadow_frac > 0.15 {
+            (12.0 + (210.0 - range).max(0.0) * 0.2).clamp(8.0, 25.0)
+        } else {
+            10.0f64
+        };
+        (c, dh)
+    } else {
+        let mut c = 10.0f64;
+        if highlight_frac > 0.08 { c *= 0.7; }
+        if shadow_frac > 0.35 { c *= 0.8; }
+        (c, 0.0f64)
+    };
+    clarity = clarity.clamp(2.0, 20.0);
 
     // Auto-levels stretching:
     // Pin black point down to ensure inky blacks & remove haze/fog:
-    let blacks = -((simulated_p01).max(8.0) * 0.45).clamp(8.0, 28.0);
+    let blacks_scale = if is_portrait { 0.35 } else { 0.50 };
+    let blacks = -((simulated_p01).max(8.0) * blacks_scale).clamp(6.0, 28.0);
 
     // Stretch whites up if headroom permits, else compress:
     let whites = if simulated_p99 < 235.0 {
@@ -124,13 +154,15 @@ pub fn auto_adjust(frame: &RawFrame, context: &Edits) -> Edits {
     };
 
     // Rich vibrance for vibrant social look:
-    let vibrance = (14.0 + (0.34 - s.mean_sat as f64) * 65.0).clamp(10.0, 35.0);
+    let base_vib = if is_portrait { 8.0 } else { 14.0 };
+    let vibrance = (base_vib + (0.34 - s.mean_sat as f64) * 60.0).clamp(6.0, 35.0);
     Edits {
         basic: BasicEdits {
             exposure_ev,
             brightness,
             contrast,
             clarity,
+            dehaze,
             vibrance,
             ..Default::default()
         },
